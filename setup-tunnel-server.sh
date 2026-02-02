@@ -162,9 +162,14 @@ restart_ssh_service() {
     log_step 4 4 "Restarting SSH service..."
     
     if command -v systemctl &> /dev/null; then
-        sudo systemctl restart sshd
+        # Debian/Ubuntu use 'ssh', RHEL/CentOS use 'sshd'
+        if systemctl list-units --type=service | grep -q 'ssh.service'; then
+            sudo systemctl restart ssh
+        else
+            sudo systemctl restart sshd
+        fi
     else
-        sudo service sshd restart
+        sudo service ssh restart 2>/dev/null || sudo service sshd restart
     fi
 }
 

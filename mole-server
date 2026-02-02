@@ -77,9 +77,9 @@ EOF
 check_ssh_service() {
     echo -e "${BLUE}SSH Service:${NC}"
     
-    # Check if sshd is running
+    # Check if sshd is running (ssh on Debian/Ubuntu, sshd on RHEL/CentOS)
     if command -v systemctl &> /dev/null; then
-        if systemctl is-active --quiet sshd; then
+        if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
             status_ok "SSH daemon is running (systemd)"
         else
             status_fail "SSH daemon is not running"
@@ -275,7 +275,8 @@ print_troubleshooting() {
     echo "    grep GatewayPorts $SSHD_CONFIG"
     echo ""
     echo "  Restart SSH service:"
-    echo "    sudo systemctl restart sshd"
+    echo "    sudo systemctl restart ssh   # Debian/Ubuntu"
+    echo "    sudo systemctl restart sshd  # RHEL/CentOS"
     echo ""
     echo "  View SSH auth log:"
     echo "    sudo tail -f /var/log/auth.log"
@@ -289,9 +290,9 @@ cmd_status_brief() {
     local tunnel_active=false
     local sshd_running=false
     
-    # Check sshd
+    # Check sshd (ssh on Debian/Ubuntu, sshd on RHEL/CentOS)
     if command -v systemctl &> /dev/null; then
-        systemctl is-active --quiet sshd && sshd_running=true
+        (systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null) && sshd_running=true
     elif pgrep -x sshd > /dev/null; then
         sshd_running=true
     fi
