@@ -1,0 +1,319 @@
+#!/bin/bash
+
+#===============================================================================
+# Constants
+#===============================================================================
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly CYAN='\033[0;36m'
+readonly NC='\033[0m'
+
+readonly SSHD_CONFIG="/etc/ssh/sshd_config"
+readonly MOSH_PORT_START=60000
+readonly MOSH_PORT_END=61000
+
+# Defaults (can be overridden by flags)
+TUNNEL_PORT="2222"
+QUIET=false
+
+#===============================================================================
+# Utility Functions
+#===============================================================================
+print_header() {
+    if [ "$QUIET" = false ]; then
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${CYAN}  SSH Tunnel Server Status${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+    fi
+}
+
+status_ok() {
+    echo -e "  ${GREEN}✓${NC} $1"
+}
+
+status_warn() {
+    echo -e "  ${YELLOW}⚠${NC} $1"
+}
+
+status_fail() {
+    echo -e "  ${RED}✗${NC} $1"
+}
+
+status_info() {
+    echo -e "  ${BLUE}ℹ${NC} $1"
+}
+
+print_usage() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Check the status of the SSH tunnel server configuration.
+
+Options:
+  -p, --tunnel-port PORT   Tunnel port to check (default: 2222)
+  -q, --quiet              Only show status, no headers or troubleshooting
+  -h, --help               Show this help message
+
+Example:
+  $(basename "$0")
+  $(basename "$0") --tunnel-port 2222
+  $(basename "$0") -q
+EOF
+}
+
+#===============================================================================
+# Argument Parsing
+#===============================================================================
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p|--tunnel-port)
+                TUNNEL_PORT="$2"
+                shift 2
+                ;;
+            -q|--quiet)
+                QUIET=true
+                shift
+                ;;
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Error: Unknown option: $1${NC}" >&2
+                echo "Use --help for usage information." >&2
+                exit 1
+                ;;
+        esac
+    done
+}
+
+#===============================================================================
+# Check Functions
+#===============================================================================
+check_ssh_service() {
+    echo -e "${BLUE}SSH Service:${NC}"
+    
+    # Check if sshd is running
+    if command -v systemctl &> /dev/null; then
+        if systemctl is-active --quiet sshd; then
+            status_ok "SSH daemon is running (systemd)"
+        else
+            status_fail "SSH daemon is not running"
+        fi
+    elif pgrep -x sshd > /dev/null; then
+        status_ok "SSH daemon is running"
+    else
+        status_fail "SSH daemon is not running"
+    fi
+    
+    # Check GatewayPorts configuration
+    if [ -f "$SSHD_CONFIG" ]; then
+        local gateway_ports
+        gateway_ports=$(grep "^GatewayPorts" "$SSHD_CONFIG" 2>/dev/null || true)
+        if [ -n "$gateway_ports" ]; then
+            if echo "$gateway_ports" | grep -q "clientspecified\|yes"; then
+                status_ok "GatewayPorts: $gateway_ports"
+            else
+                status_warn "GatewayPorts may not allow tunnels: $gateway_ports"
+            fi
+        else
+            status_warn "GatewayPorts not configured (defaults to 'no')"
+        fi
+    else
+        status_warn "Cannot read sshd_config"
+    fi
+    
+    # Check if backup exists
+    if [ -f "${SSHD_CONFIG}.backup" ]; then
+        status_info "Config backup exists: ${SSHD_CONFIG}.backup"
+    fi
+    echo ""
+}
+
+check_tunnel_port() {
+    echo -e "${BLUE}Tunnel Port ($TUNNEL_PORT):${NC}"
+    
+    # Check if something is listening on the tunnel port
+    local listener=""
+    if command -v ss &> /dev/null; then
+        listener=$(ss -tlnp 2>/dev/null | grep ":${TUNNEL_PORT} " || true)
+    elif command -v netstat &> /dev/null; then
+        listener=$(netstat -tlnp 2>/dev/null | grep ":${TUNNEL_PORT} " || true)
+    fi
+    
+    if [ -n "$listener" ]; then
+        status_ok "Port $TUNNEL_PORT is listening (tunnel is active)"
+        # Try to show what's listening
+        local proc_info
+        proc_info=$(echo "$listener" | grep -oE 'users:\(\("[^"]+' | sed 's/users:(("//' || true)
+        if [ -n "$proc_info" ]; then
+            status_info "Process: $proc_info"
+        fi
+    else
+        status_warn "Port $TUNNEL_PORT is not listening (tunnel not connected)"
+    fi
+    
+    # Check for established connections through the tunnel
+    local connections=""
+    if command -v ss &> /dev/null; then
+        connections=$(ss -tnp 2>/dev/null | grep ":${TUNNEL_PORT}" | grep -c ESTAB || echo "0")
+    elif command -v netstat &> /dev/null; then
+        connections=$(netstat -tnp 2>/dev/null | grep ":${TUNNEL_PORT}" | grep -c ESTABLISHED || echo "0")
+    fi
+    
+    if [ "$connections" -gt 0 ]; then
+        status_info "Active connections through tunnel: $connections"
+    fi
+    echo ""
+}
+
+check_mosh() {
+    echo -e "${BLUE}Mosh:${NC}"
+    
+    # Check if mosh-server is installed
+    if command -v mosh-server &> /dev/null; then
+        local mosh_version
+        mosh_version=$(mosh-server --version 2>&1 | head -1 || echo "unknown version")
+        status_ok "mosh-server is installed ($mosh_version)"
+    else
+        status_fail "mosh-server is not installed"
+    fi
+    
+    # Check for active mosh sessions
+    local mosh_sessions
+    mosh_sessions=$(pgrep -c mosh-server 2>/dev/null || echo "0")
+    if [ "$mosh_sessions" -gt 0 ]; then
+        status_info "Active mosh sessions: $mosh_sessions"
+    else
+        status_info "No active mosh sessions"
+    fi
+    echo ""
+}
+
+check_firewall() {
+    echo -e "${BLUE}Firewall:${NC}"
+    
+    if command -v ufw &> /dev/null; then
+        status_info "Firewall: ufw"
+        
+        # Check if ufw is active
+        if sudo ufw status 2>/dev/null | grep -q "Status: active"; then
+            status_ok "ufw is active"
+            
+            # Check tunnel port rule
+            if sudo ufw status 2>/dev/null | grep -q "${TUNNEL_PORT}/tcp"; then
+                status_ok "Tunnel port $TUNNEL_PORT/tcp is allowed"
+            else
+                status_fail "Tunnel port $TUNNEL_PORT/tcp rule not found"
+            fi
+            
+            # Check mosh port range
+            if sudo ufw status 2>/dev/null | grep -qE "${MOSH_PORT_START}:${MOSH_PORT_END}/udp|${MOSH_PORT_START}.*${MOSH_PORT_END}.*udp"; then
+                status_ok "Mosh UDP ports ${MOSH_PORT_START}-${MOSH_PORT_END} are allowed"
+            else
+                status_warn "Mosh UDP port range rule not found"
+            fi
+        else
+            status_info "ufw is inactive"
+        fi
+        
+    elif command -v firewall-cmd &> /dev/null; then
+        status_info "Firewall: firewalld"
+        
+        # Check if firewalld is running
+        if systemctl is-active --quiet firewalld; then
+            status_ok "firewalld is active"
+            
+            # Check tunnel port rule
+            if sudo firewall-cmd --list-ports 2>/dev/null | grep -q "${TUNNEL_PORT}/tcp"; then
+                status_ok "Tunnel port $TUNNEL_PORT/tcp is allowed"
+            else
+                status_fail "Tunnel port $TUNNEL_PORT/tcp rule not found"
+            fi
+            
+            # Check mosh port range
+            if sudo firewall-cmd --list-ports 2>/dev/null | grep -qE "${MOSH_PORT_START}-${MOSH_PORT_END}/udp"; then
+                status_ok "Mosh UDP ports ${MOSH_PORT_START}-${MOSH_PORT_END} are allowed"
+            else
+                status_warn "Mosh UDP port range rule not found"
+            fi
+        else
+            status_info "firewalld is inactive"
+        fi
+        
+    else
+        status_warn "No supported firewall detected (ufw/firewalld)"
+        status_info "Ensure ports are open: TCP $TUNNEL_PORT, UDP ${MOSH_PORT_START}-${MOSH_PORT_END}"
+    fi
+    echo ""
+}
+
+check_active_connections() {
+    echo -e "${BLUE}Active SSH Connections:${NC}"
+    
+    # Count SSH connections
+    local ssh_connections
+    if command -v ss &> /dev/null; then
+        ssh_connections=$(ss -tnp 2>/dev/null | grep ":22 " | grep -c ESTAB || echo "0")
+    elif command -v netstat &> /dev/null; then
+        ssh_connections=$(netstat -tnp 2>/dev/null | grep ":22 " | grep -c ESTABLISHED || echo "0")
+    else
+        ssh_connections="unknown"
+    fi
+    
+    status_info "SSH connections on port 22: $ssh_connections"
+    
+    # Show who's connected
+    local who_output
+    who_output=$(who 2>/dev/null || true)
+    if [ -n "$who_output" ]; then
+        echo ""
+        echo -e "  ${CYAN}Logged in users:${NC}"
+        echo "$who_output" | sed 's/^/    /'
+    fi
+    echo ""
+}
+
+print_troubleshooting() {
+    if [ "$QUIET" = true ]; then
+        return
+    fi
+    
+    echo -e "${BLUE}Troubleshooting Commands:${NC}"
+    echo ""
+    echo "  Check tunnel port listener:"
+    echo "    ss -tlnp | grep $TUNNEL_PORT"
+    echo ""
+    echo "  Test tunnel from this server:"
+    echo "    ssh -p $TUNNEL_PORT localhost"
+    echo ""
+    echo "  Check SSH config:"
+    echo "    grep GatewayPorts $SSHD_CONFIG"
+    echo ""
+    echo "  Restart SSH service:"
+    echo "    sudo systemctl restart sshd"
+    echo ""
+    echo "  View SSH auth log:"
+    echo "    sudo tail -f /var/log/auth.log"
+    echo ""
+}
+
+#===============================================================================
+# Main
+#===============================================================================
+main() {
+    parse_args "$@"
+    print_header
+    check_ssh_service
+    check_tunnel_port
+    check_mosh
+    check_firewall
+    check_active_connections
+    print_troubleshooting
+}
+
+main "$@"
