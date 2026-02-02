@@ -1,8 +1,11 @@
 #!/bin/bash
 
 #===============================================================================
-# Constants
+# mole-server - SSH Tunnel Server Status & Control
 #===============================================================================
+set -e
+
+readonly VERSION="1.0.0"
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
@@ -14,22 +17,13 @@ readonly SSHD_CONFIG="/etc/ssh/sshd_config"
 readonly MOSH_PORT_START=60000
 readonly MOSH_PORT_END=61000
 
-# Defaults (can be overridden by flags)
+# Options
 TUNNEL_PORT="2222"
-QUIET=false
+VERBOSE=false
 
 #===============================================================================
 # Utility Functions
 #===============================================================================
-print_header() {
-    if [ "$QUIET" = false ]; then
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${CYAN}  SSH Tunnel Server Status${NC}"
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo ""
-    fi
-}
-
 status_ok() {
     echo -e "  ${GREEN}✓${NC} $1"
 }
@@ -46,53 +40,39 @@ status_info() {
     echo -e "  ${BLUE}ℹ${NC} $1"
 }
 
+print_header() {
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  SSH Tunnel Server Status${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+}
+
 print_usage() {
     cat << EOF
-Usage: $(basename "$0") [OPTIONS]
+Usage: $(basename "$0") <command> [OPTIONS]
 
-Check the status of the SSH tunnel server configuration.
+Monitor the SSH tunnel server configuration and status.
 
-Options:
-  -p, --tunnel-port PORT   Tunnel port to check (default: 2222)
-  -q, --quiet              Only show status, no headers or troubleshooting
-  -h, --help               Show this help message
+Commands:
+  status             Show server status
 
-Example:
-  $(basename "$0")
-  $(basename "$0") --tunnel-port 2222
-  $(basename "$0") -q
+Options (for status):
+  -v, --verbose      Detailed output with troubleshooting info
+  -p, --port PORT    Tunnel port to check (default: 2222)
+
+General:
+  -h, --help         Show this help message
+  --version          Show version
+
+Examples:
+  $(basename "$0") status
+  $(basename "$0") status -v
+  $(basename "$0") status --port 2222
 EOF
 }
 
 #===============================================================================
-# Argument Parsing
-#===============================================================================
-parse_args() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -p|--tunnel-port)
-                TUNNEL_PORT="$2"
-                shift 2
-                ;;
-            -q|--quiet)
-                QUIET=true
-                shift
-                ;;
-            -h|--help)
-                print_usage
-                exit 0
-                ;;
-            *)
-                echo -e "${RED}Error: Unknown option: $1${NC}" >&2
-                echo "Use --help for usage information." >&2
-                exit 1
-                ;;
-        esac
-    done
-}
-
-#===============================================================================
-# Check Functions
+# Status Checks
 #===============================================================================
 check_ssh_service() {
     echo -e "${BLUE}SSH Service:${NC}"
@@ -279,7 +259,7 @@ check_active_connections() {
 }
 
 print_troubleshooting() {
-    if [ "$QUIET" = true ]; then
+    if [ "$VERBOSE" = false ]; then
         return
     fi
     
@@ -303,10 +283,71 @@ print_troubleshooting() {
 }
 
 #===============================================================================
-# Main
+# Commands
 #===============================================================================
-main() {
-    parse_args "$@"
+cmd_status_brief() {
+    local tunnel_active=false
+    local sshd_running=false
+    
+    # Check sshd
+    if command -v systemctl &> /dev/null; then
+        systemctl is-active --quiet sshd && sshd_running=true
+    elif pgrep -x sshd > /dev/null; then
+        sshd_running=true
+    fi
+    
+    # Check tunnel port
+    local listener=""
+    if command -v ss &> /dev/null; then
+        listener=$(ss -tlnp 2>/dev/null | grep ":${TUNNEL_PORT} " || true)
+    elif command -v netstat &> /dev/null; then
+        listener=$(netstat -tlnp 2>/dev/null | grep ":${TUNNEL_PORT} " || true)
+    fi
+    [ -n "$listener" ] && tunnel_active=true
+    
+    if [ "$sshd_running" = true ]; then
+        status_ok "SSH daemon is running"
+    else
+        status_fail "SSH daemon is not running"
+    fi
+    
+    if [ "$tunnel_active" = true ]; then
+        status_ok "Tunnel port $TUNNEL_PORT is listening"
+    else
+        status_warn "Tunnel port $TUNNEL_PORT is not listening"
+    fi
+}
+
+cmd_status() {
+    # Parse status-specific options
+    shift  # Remove 'status' from args
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -p|--port)
+                TUNNEL_PORT="$2"
+                shift 2
+                ;;
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Error: Unknown option: $1${NC}" >&2
+                echo "Use --help for usage information." >&2
+                exit 1
+                ;;
+        esac
+    done
+    
+    if [ "$VERBOSE" = false ]; then
+        cmd_status_brief
+        return
+    fi
+    
     print_header
     check_ssh_service
     check_tunnel_port
@@ -314,6 +355,34 @@ main() {
     check_firewall
     check_active_connections
     print_troubleshooting
+}
+
+#===============================================================================
+# Main
+#===============================================================================
+main() {
+    local command="${1:-}"
+    
+    case "$command" in
+        status)
+            cmd_status "$@"
+            ;;
+        -h|--help|help)
+            print_usage
+            ;;
+        --version)
+            echo "mole-server version $VERSION"
+            ;;
+        "")
+            print_usage
+            exit 1
+            ;;
+        *)
+            echo -e "${RED}Error: Unknown command: $command${NC}" >&2
+            echo "Use --help for usage information." >&2
+            exit 1
+            ;;
+    esac
 }
 
 main "$@"
