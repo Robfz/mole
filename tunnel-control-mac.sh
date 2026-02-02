@@ -9,7 +9,7 @@ readonly YELLOW='\033[1;33m'
 readonly BLUE='\033[0;34m'
 readonly NC='\033[0m'
 
-readonly PLIST_LABEL="com.robfz.ssh-tunnel"
+readonly PLIST_LABEL="com.robfz.mole"
 readonly PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
 #===============================================================================

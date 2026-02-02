@@ -1,4 +1,4 @@
-# SSH Tunnel
+# Mole
 
 A persistent reverse SSH tunnel system that allows secure remote access to a Mac behind NAT, using a Linux server as a jump host with Mosh support for reliable connections.
 
@@ -189,7 +189,7 @@ caffeinate -s autossh -M 0 -N \
 
 ### launchd Service
 
-The tunnel runs as a user launch agent (`~/Library/LaunchAgents/com.robfz.ssh-tunnel.plist`) that:
+The tunnel runs as a user launch agent (`~/Library/LaunchAgents/com.robfz.mole.plist`) that:
 - Starts automatically at login
 - Restarts if the process dies
 - Only runs when network is available

@@ -11,7 +11,7 @@ readonly CYAN='\033[0;36m'
 readonly NC='\033[0m'
 
 # Defaults (can be overridden by flags)
-PLIST_LABEL="com.robfz.ssh-tunnel"
+PLIST_LABEL="com.robfz.mole"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 LOG_FILE="/tmp/ssh-tunnel.log"
 ERR_FILE="/tmp/ssh-tunnel.err"
